@@ -507,22 +507,42 @@ async function uploadCustomImage(imageBuffer, fileName, req) {
       });
       console.log('Successfully uploaded to Dropbox:', dropboxPath);
 
-      // Create a shared link for the file
-      const sharedLinkResponse = await dropbox.sharingCreateSharedLink({
-        path: dropboxPath,
-        settings: {
-          requested_visibility: 'public'
+      // Try to create a shared link; if it already exists, fetch it
+      let sharedLink;
+      try {
+        const sharedLinkResponse = await dropbox.sharingCreateSharedLink({
+          path: dropboxPath,
+          settings: {
+            requested_visibility: 'public'
+          }
+        });
+        sharedLink = sharedLinkResponse.result.url;
+        console.log('Dropbox shared link (new):', sharedLink);
+      } catch (linkError) {
+        // If link already exists, list existing shared links
+        console.log('Shared link already exists, fetching existing link...');
+        const existingLinks = await dropbox.sharingListSharedLinks({
+          path: dropboxPath,
+          direct_only: true
+        });
+        if (existingLinks.result.links && existingLinks.result.links.length > 0) {
+          sharedLink = existingLinks.result.links[0].url;
+          console.log('Dropbox shared link (existing):', sharedLink);
+        } else {
+          throw new Error('Could not create or fetch shared link');
         }
-      });
-
-      const sharedLink = sharedLinkResponse.result.url;
-      console.log('Dropbox shared link:', sharedLink);
+      }
 
       // Convert shared link to direct download link
-      const directLink = sharedLink.replace('www.dropbox.com', 'dl.dropboxusercontent.com').replace('?dl=0', '');
-      
+      const directLink = sharedLink
+        .replace('www.dropbox.com', 'dl.dropboxusercontent.com')
+        .replace('?dl=0', '')
+        .replace('&dl=0', '');
+
+      console.log('Dropbox direct link:', directLink);
+
       return {
-        secure_url: directLink, // Return Dropbox URL
+        secure_url: directLink,   // <-- now this IS the Dropbox URL
         public_id: newFileName,
         dropbox_url: directLink,
         exists: false
@@ -530,22 +550,26 @@ async function uploadCustomImage(imageBuffer, fileName, req) {
     } catch (dropboxError) {
       console.error('Error uploading to Dropbox:', dropboxError.message);
       console.error('Falling back to local storage');
-      
+
       // Fallback to local storage if Dropbox fails
       const imgDir = path.join(__dirname, 'img');
-      
+
       if (!fs.existsSync(imgDir)) {
         fs.mkdirSync(imgDir, { recursive: true });
         console.log('Created img directory:', imgDir);
       }
-      
+
       const filePath = path.join(imgDir, newFileName);
       fs.writeFileSync(filePath, imageBuffer);
-      
+
       console.log('Saved custom image locally to:', filePath);
-      
+
+      // Build a full local URL using the request host
+      const serverUrl = `${req.protocol}://${req.get('host')}`;
+      const localUrl = `${serverUrl}/img/${newFileName}`;
+
       return {
-        secure_url: newFileName, // Return filename for local serving
+        secure_url: localUrl,
         public_id: newFileName,
         exists: false
       };
@@ -1061,11 +1085,11 @@ app.post('/replace-image', async (req, res) => {
       try {
         const response = await axios.get(newImageData, { responseType: 'arraybuffer' });
         const buffer = Buffer.from(response.data, 'binary');
-        
+
         // Generate unique filename
         const hash = crypto.createHash('md5').update(newImageData).digest('hex');
         const fileName = `${hash}.jpg`;
-        
+
         uploadResult = await uploadCustomImage(buffer, fileName, req);
         console.log('Download and save successful');
       } catch (uploadError) {
@@ -1078,11 +1102,11 @@ app.post('/replace-image', async (req, res) => {
       try {
         const base64Data = newImageData.split(',')[1];
         const buffer = Buffer.from(base64Data, 'base64');
-        
+
         // Generate unique filename
         const hash = crypto.createHash('md5').update(base64Data).digest('hex');
         const fileName = `${hash}.jpg`;
-        
+
         uploadResult = await uploadCustomImage(buffer, fileName, req);
         console.log('Base64 save successful');
       } catch (uploadError) {
@@ -1095,8 +1119,12 @@ app.post('/replace-image', async (req, res) => {
     }
 
     console.log('Image replaced successfully locally');
-    console.log('New filename:', uploadResult.secure_url);
+    console.log('New URL:', uploadResult.secure_url);
     console.log('New public_id:', uploadResult.public_id);
+
+    // Determine the URL to store in Google Sheets
+    // uploadResult.secure_url is now the Dropbox direct link (or local fallback URL)
+    const storedUrl = uploadResult.secure_url;
 
     // Update Google Sheets if URL is provided
     if (url) {
@@ -1107,10 +1135,10 @@ app.post('/replace-image', async (req, res) => {
           console.log('Found row in Google Sheets:', row.index);
           // Update the image URL in column D (index 3, 0-based) with Dropbox URL
           const rowData = row.data;
-          rowData[3] = uploadResult.secure_url; // Store Dropbox URL
+          rowData[3] = storedUrl; // Store full Dropbox URL (not just filename)
           const updateSuccess = await updateGoogleSheetRow(sheets, row.index, rowData);
           if (updateSuccess) {
-            console.log('Google Sheets updated successfully with Dropbox URL:', uploadResult.secure_url);
+            console.log('Google Sheets updated successfully with URL:', storedUrl);
           } else {
             console.log('Failed to update Google Sheets');
           }
@@ -1123,22 +1151,11 @@ app.post('/replace-image', async (req, res) => {
       }
     }
 
-    // Return the appropriate URL based on upload success
-    let imageUrl;
-    if (uploadResult.dropbox_url) {
-      imageUrl = uploadResult.dropbox_url;
-      console.log('Using Dropbox URL:', imageUrl);
-    } else {
-      const serverUrl = `${req.protocol}://${req.get('host')}`;
-      imageUrl = `${serverUrl}/img/${uploadResult.secure_url}`;
-      console.log('Using local server URL:', imageUrl);
-    }
-
     res.json({
       success: true,
       message: 'Image replaced successfully',
-      newImageUrl: imageUrl, // Return URL for immediate display
-      filename: uploadResult.secure_url, // Return filename or Dropbox URL for storage
+      newImageUrl: storedUrl,          // Full URL for immediate display
+      filename: uploadResult.public_id, // Filename / public_id for reference
       publicId: uploadResult.public_id
     });
 
