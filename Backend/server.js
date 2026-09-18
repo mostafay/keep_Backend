@@ -3,15 +3,13 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const cloudinary = require('cloudinary').v2;
 const cors = require('cors');
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const puppeteer = require('puppeteer');
 const { google } = require('googleapis');
 const crypto = require('crypto');
 const { Dropbox } = require('dropbox');
 const ytdl = require('ytdl-core');
 const fs = require('fs');
 const path = require('path');
-puppeteer.use(StealthPlugin());
 require('dotenv').config();
 
 const app = express();
