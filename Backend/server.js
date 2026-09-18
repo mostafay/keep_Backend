@@ -885,18 +885,12 @@ app.post('/process-missing-images', async (req, res) => {
 // Route to process data to JSON and store in 'read' sheet
 app.post('/process-data-to-json', async (req, res) => {
   try {
-    console.log('=== /process-data-to-json endpoint called ===');
-    console.log('Spreadsheet ID:', SPREADSHEET_ID);
-    
     // Initialize Google Sheets
     const sheets = await initGoogleSheets();
 
     const spreadsheetId = SPREADSHEET_ID;
     const sourceSheetName = 'keep';
     const targetSheetName = 'read';
-
-    console.log('Source sheet:', sourceSheetName);
-    console.log('Target sheet:', targetSheetName);
 
     // Read all data from source sheet to get total rows
     const totalResponse = await sheets.spreadsheets.values.get({
@@ -905,18 +899,7 @@ app.post('/process-data-to-json', async (req, res) => {
     });
 
     const totalRows = totalResponse.data.values ? totalResponse.data.values.length : 0;
-    console.log(`Total rows in ${sourceSheetName}: ${totalRows}`);
-    
-    // Log first few rows for debugging
-    if (totalResponse.data.values && totalResponse.data.values.length > 0) {
-      console.log('Header row:', totalResponse.data.values[0]);
-      if (totalResponse.data.values.length > 1) {
-        console.log('First data row:', totalResponse.data.values[1]);
-      }
-      if (totalResponse.data.values.length > 2) {
-        console.log('Second data row:', totalResponse.data.values[2]);
-      }
-    }
+    console.log(`Total rows in sheet: ${totalRows}`);
 
     // Process data in batches of 100 rows (0-99, 100-199, etc.)
     const batchSize = 100;
