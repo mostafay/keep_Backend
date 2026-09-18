@@ -3,7 +3,13 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const cloudinary = require('cloudinary').v2;
 const cors = require('cors');
-const puppeteer = require('puppeteer-core');
+// Use puppeteer-core on Render, puppeteer on local
+let puppeteer;
+if (process.env.RENDER === 'true') {
+  puppeteer = require('puppeteer-core');
+} else {
+  puppeteer = require('puppeteer');
+}
 const { google } = require('googleapis');
 const crypto = require('crypto');
 const { Dropbox } = require('dropbox');
@@ -304,14 +310,15 @@ async function extractLargestImage(url) {
       console.log(`Using proxy server: ${proxyServer}`);
     }
 
-    // Use @sparticuz/chromium on Render, local Chrome otherwise
+    // Use @sparticuz/chromium on Render, puppeteer bundled Chrome on local
     let executablePath;
     if (process.env.RENDER === 'true') {
       const chromium = require('@sparticuz/chromium');
       executablePath = await chromium.executablePath();
       launchArgs.push(...chromium.args);
     } else {
-      executablePath = process.env.CHROME_EXECUTABLE_PATH || undefined;
+      // Local: puppeteer will use bundled Chrome, no need for executablePath
+      executablePath = undefined;
     }
 
     browser = await puppeteer.launch({
