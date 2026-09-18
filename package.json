@@ -3,8 +3,8 @@
   "version": "1.0.0",
   "description": "Flutter app with Node.js backend",
   "scripts": {
-    "start": "node server.js",
-    "build": "npx puppeteer browsers install chrome"
+    "start": "cd Backend && node server.js",
+    "build": "cd Backend && npm run build"
   },
   "engines": {
     "node": ">=18.0.0"
