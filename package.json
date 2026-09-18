@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Flutter app with Node.js backend",
   "scripts": {
-    "start": "cd Backend && node server.js",
+    "start": "node Backend/server.js",
     "build": "cd Backend && npm run build"
   },
   "engines": {
