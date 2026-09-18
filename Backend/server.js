@@ -3,7 +3,7 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const cloudinary = require('cloudinary').v2;
 const cors = require('cors');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-core');
 const { google } = require('googleapis');
 const crypto = require('crypto');
 const { Dropbox } = require('dropbox');
@@ -304,8 +304,15 @@ async function extractLargestImage(url) {
       console.log(`Using proxy server: ${proxyServer}`);
     }
 
-    // Try to use system Chrome first, fallback to bundled
-    const executablePath = process.env.CHROME_EXECUTABLE_PATH || undefined;
+    // Use @sparticuz/chromium on Render, local Chrome otherwise
+    let executablePath;
+    if (process.env.RENDER === 'true') {
+      const chromium = require('@sparticuz/chromium');
+      executablePath = chromium.executablePath();
+      launchArgs.push(...chromium.args);
+    } else {
+      executablePath = process.env.CHROME_EXECUTABLE_PATH || undefined;
+    }
 
     browser = await puppeteer.launch({
       headless: 'new',
