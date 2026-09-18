@@ -308,7 +308,7 @@ async function extractLargestImage(url) {
     let executablePath;
     if (process.env.RENDER === 'true') {
       const chromium = require('@sparticuz/chromium');
-      executablePath = chromium.executablePath();
+      executablePath = await chromium.executablePath();
       launchArgs.push(...chromium.args);
     } else {
       executablePath = process.env.CHROME_EXECUTABLE_PATH || undefined;
