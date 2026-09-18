@@ -540,9 +540,11 @@ async function uploadCustomImage(imageBuffer, fileName, req) {
 // Route to extract and upload image from a URL
 app.post('/extract-image', async (req, res) => {
   try {
+    console.log('Request body:', req.body);
     const { url } = req.body;
 
     if (!url) {
+      console.log('URL is missing from request body');
       return res.status(400).json({ error: 'URL is required' });
     }
 
