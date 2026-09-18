@@ -21,6 +21,14 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
+// Log all incoming requests
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  console.log('Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('Body:', JSON.stringify(req.body, null, 2));
+  next();
+});
+
 // Custom middleware to serve .p files as .jpg (for local fallback)
 app.get('/img/:filename', (req, res) => {
   const fs = require('fs');
