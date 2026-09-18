@@ -105,9 +105,77 @@ cloudinary.config({
 });
 
 // Initialize Dropbox
-const dropbox = new Dropbox({
-  accessToken: process.env.DROPBOX_ACCESS_TOKEN
-});
+// Dropbox instance (lazy initialized from Google Sheets A2 in 'read' sheet)
+let dropbox = null;
+let dropboxTokenCache = null;
+let dropboxTokenFetchedAt = 0;
+const DROPBOX_TOKEN_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Read Dropbox access token from cell A2 in the 'read' sheet
+ * @param {Object} sheets - Google Sheets API instance (optional)
+ * @returns {Promise<string|null>} - Dropbox access token or null
+ */
+async function getDropboxTokenFromSheets(sheetsInstance = null) {
+  // Check cache first
+  const now = Date.now();
+  if (dropboxTokenCache && (now - dropboxTokenFetchedAt) < DROPBOX_TOKEN_CACHE_TTL) {
+    return dropboxTokenCache;
+  }
+
+  try {
+    const sheets = sheetsInstance || await initGoogleSheets();
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'read!A2',
+    });
+
+    const token = response.data.values?.[0]?.[0];
+    if (!token || token.trim() === '') {
+      console.warn('⚠️  Dropbox token is empty in read!A2');
+      return null;
+    }
+
+    // Update cache
+    dropboxTokenCache = token.trim();
+    dropboxTokenFetchedAt = now;
+    console.log('✅ Dropbox token loaded from read!A2');
+    return dropboxTokenCache;
+  } catch (error) {
+    console.error('❌ Failed to read Dropbox token from read!A2:', error.message);
+    return null;
+  }
+}
+
+/**
+ * Get or create a Dropbox instance using token from Google Sheets
+ * @returns {Promise<Object>} - Dropbox client instance
+ */
+async function getDropboxClient() {
+  const token = await getDropboxTokenFromSheets();
+  
+  if (!token) {
+    throw new Error('Dropbox access token is not available (read!A2 is empty or unreachable)');
+  }
+
+  // Recreate client if token changed
+  if (!dropbox || dropbox._accessToken !== token) {
+    dropbox = new Dropbox({ accessToken: token });
+    // Store token reference for comparison
+    dropbox._accessToken = token;
+  }
+
+  return dropbox;
+}
+
+/**
+ * Force refresh the Dropbox token (call this if you get 401 errors)
+ */
+async function refreshDropboxToken() {
+  dropboxTokenCache = null;
+  dropboxTokenFetchedAt = 0;
+  return await getDropboxTokenFromSheets();
+}
 
 // Google Sheets API Configuration
 const SPREADSHEET_ID = '1VxRAUEZL66XCnh05pi3y1627R8hqQ2hx6mZpMJ7HJ2I';
@@ -219,40 +287,26 @@ async function writeToGoogleSheets(sheets, rowData) {
     return false;
   }
 }
-
-/**
- * Update existing row in Google Sheets
- * @param {Object} sheets - Google Sheets API instance
- * @param {number} rowIndex - Row index (1-based)
- * @param {Array} rowData - Array of values to update
- * @returns {Promise<boolean>} - Success status
- */
 async function updateGoogleSheetRow(sheets, rowIndex, rowData) {
   try {
-    const response = await sheets.spreadsheets.values.update({
+    await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
       range: `${SHEET_NAME}!A${rowIndex}:Z${rowIndex}`,
       valueInputOption: 'USER_ENTERED',
-      resource: {
-        values: [rowData]
-      }
+      resource: { values: [rowData] },
     });
-
-    console.log('Row updated in Google Sheets successfully');
-    if (response.data && response.data.updates) {
-      console.log('Updated range:', response.data.updates.updatedRange);
-    }
     return true;
   } catch (error) {
-    console.error('Error updating Google Sheets row:', error.message);
+    console.error(`❌ [Sheets] Row ${rowIndex} update FAILED: ${error.message}`);
     return false;
   }
 }
 
+
 /**
  * Find row by URL in Google Sheets
  * @param {Object} sheets - Google Sheets API instance
- * @param {string} url - URL to search for
+ * @param {string} url - URL to search for (in column C)
  * @returns {Promise<Object|null>} - Row data with index or null if not found
  */
 async function findRowByUrl(sheets, url) {
@@ -269,11 +323,11 @@ async function findRowByUrl(sheets, url) {
 
     // Search for URL in column C (index 2, 0-based)
     for (let i = 1; i < rows.length; i++) { // Skip header row (index 0)
-      const rowUrl = rows[i][2]; // Column C is index 2
+      const rowUrl = rows[i][2]; // Column C
       if (rowUrl === url) {
         return {
           index: i + 1, // Convert to 1-based index
-          data: rows[i]
+          data: rows[i],
         };
       }
     }
@@ -486,98 +540,102 @@ async function uploadToCloud(imageUrl) {
  * @returns {Promise<Object>} - Upload result with dynamic URL
  */
 async function uploadCustomImage(imageBuffer, fileName, req) {
+  const fs = require('fs');
+  const path = require('path');
+
+  const baseName = path.basename(fileName, path.extname(fileName));
+  const newFileName = `${baseName}.p`;
+  const dropboxPath = `/keep-images/${newFileName}`;
+
   try {
-    const fs = require('fs');
-    const path = require('path');
-
-    // Change extension to .p for pseudo-encryption
-    const baseName = path.basename(fileName, path.extname(fileName));
-    const newFileName = `${baseName}.p`;
-    const dropboxPath = `/keep-images/${newFileName}`;
-
-    console.log('Uploading to Dropbox:', dropboxPath);
-
     // Upload to Dropbox
+    const dropboxClient = await getDropboxClient();
+await dropboxClient.filesUpload({
+      path: dropboxPath,
+      contents: imageBuffer,
+      mode: 'overwrite',
+      autorename: false,
+    });
+
+    // Create or fetch shared link
+    let sharedLink;
     try {
-      await dropbox.filesUpload({
+        const sharedLinkResponse = await dropboxClient.sharingCreateSharedLink({
         path: dropboxPath,
-        contents: imageBuffer,
-        mode: 'overwrite',
-        autorename: false
+        settings: { requested_visibility: 'public' },
       });
-      console.log('Successfully uploaded to Dropbox:', dropboxPath);
-
-      // Try to create a shared link; if it already exists, fetch it
-      let sharedLink;
-      try {
-        const sharedLinkResponse = await dropbox.sharingCreateSharedLink({
-          path: dropboxPath,
-          settings: {
-            requested_visibility: 'public'
-          }
-        });
-        sharedLink = sharedLinkResponse.result.url;
-        console.log('Dropbox shared link (new):', sharedLink);
-      } catch (linkError) {
-        // If link already exists, list existing shared links
-        console.log('Shared link already exists, fetching existing link...');
-        const existingLinks = await dropbox.sharingListSharedLinks({
-          path: dropboxPath,
-          direct_only: true
-        });
-        if (existingLinks.result.links && existingLinks.result.links.length > 0) {
-          sharedLink = existingLinks.result.links[0].url;
-          console.log('Dropbox shared link (existing):', sharedLink);
-        } else {
-          throw new Error('Could not create or fetch shared link');
-        }
+      sharedLink = sharedLinkResponse.result.url;
+    } catch (linkError) {
+      const existingLinks = await dropboxClient.sharingListSharedLinks({
+        path: dropboxPath,
+        direct_only: true,
+      });
+      if (existingLinks.result.links && existingLinks.result.links.length > 0) {
+        sharedLink = existingLinks.result.links[0].url;
+      } else {
+        throw new Error('Could not create or fetch shared link');
       }
+    }
 
-      // Convert shared link to direct download link
-      const directLink = sharedLink
-        .replace('www.dropbox.com', 'dl.dropboxusercontent.com')
-        .replace('?dl=0', '')
-        .replace('&dl=0', '');
+    // Convert to direct download link
+    const directLink = sharedLink
+      .replace('www.dropbox.com', 'dl.dropboxusercontent.com')
+      .replace('?dl=0', '')
+      .replace('&dl=0', '');
 
-      console.log('Dropbox direct link:', directLink);
+    return {
+      secure_url: directLink,
+      public_id: newFileName,
+      dropbox_url: directLink,
+      exists: false,
+    };
 
-      return {
-        secure_url: directLink,   // <-- now this IS the Dropbox URL
-        public_id: newFileName,
-        dropbox_url: directLink,
-        exists: false
-      };
-    } catch (dropboxError) {
-      console.error('Error uploading to Dropbox:', dropboxError.message);
-      console.error('Falling back to local storage');
+  } catch (dropboxError) {
+    // ────────────────────────────────────────────────────────────
+    // ✅ التقرير الوحيد المطلوب: انتهاء صلاحية التوكن
+    // ────────────────────────────────────────────────────────────
+    const errorTag =
+      dropboxError?.error?.error?.['.tag'] ||
+      dropboxError?.error?.error;
 
-      // Fallback to local storage if Dropbox fails
+    if (
+      dropboxError.status === 401 ||
+      errorTag === 'expired_access_token' ||
+      errorTag === 'invalid_access_token'
+    ) {
+      console.error('');
+      console.error('╔════════════════════════════════════════════════════════════╗');
+      console.error('║  ⚠️  DROPBOX TOKEN EXPIRED / INVALID                       ║');
+      console.error('╚════════════════════════════════════════════════════════════╝');
+      console.error(`   ├─ Tag     : ${errorTag}`);
+      console.error(`   ├─ Status  : ${dropboxError.status}`);
+      console.error(`   └─ Message : ${dropboxError.message}`);
+      console.error('   👉 أعد توليد DROPBOX_ACCESS_TOKEN وحدّثه في .env و Render');
+      console.error('');
+    }
+
+    // Fallback to local storage
+    try {
       const imgDir = path.join(__dirname, 'img');
-
       if (!fs.existsSync(imgDir)) {
         fs.mkdirSync(imgDir, { recursive: true });
-        console.log('Created img directory:', imgDir);
       }
 
       const filePath = path.join(imgDir, newFileName);
       fs.writeFileSync(filePath, imageBuffer);
 
-      console.log('Saved custom image locally to:', filePath);
-
-      // Build a full local URL using the request host
       const serverUrl = `${req.protocol}://${req.get('host')}`;
       const localUrl = `${serverUrl}/img/${newFileName}`;
 
       return {
         secure_url: localUrl,
         public_id: newFileName,
-        exists: false
+        exists: false,
       };
+
+    } catch (localError) {
+      throw localError;
     }
-  } catch (error) {
-    console.error('Error uploading custom image:', error.message);
-    console.error('Full error:', error);
-    throw error;
   }
 }
 
@@ -1057,115 +1115,119 @@ app.get('/get-json-data', async (req, res) => {
 });
 
 // Route to replace image with custom image (local storage)
+// Route to replace image with custom image
 app.post('/replace-image', async (req, res) => {
-  console.log('=== /replace-image endpoint called ===');
-  console.log('Request body keys:', Object.keys(req.body));
-  console.log('Request body:', JSON.stringify(req.body, null, 2).substring(0, 500));
+  const startTime = Date.now();
 
   try {
     const { oldImageUrl, newImageData, url } = req.body;
 
-    console.log('=== Replace Image Request ===');
-    console.log('Old image URL:', oldImageUrl);
-    console.log('New data type:', newImageData ? newImageData.substring(0, 50) : 'undefined');
-    console.log('New data length:', newImageData ? newImageData.length : 0);
-    console.log('URL for Google Sheets update:', url || 'Not provided');
-
     if (!oldImageUrl || !newImageData) {
-      console.log('Missing required fields');
-      return res.status(400).json({ error: 'oldImageUrl and newImageData are required' });
+      return res.status(400).json({
+        error: 'oldImageUrl and newImageData are required',
+      });
     }
 
     let uploadResult;
 
-    // Check if it's a URL (http/https) or base64 data
-    if (newImageData.startsWith('http://') || newImageData.startsWith('https://')) {
-      // It's a URL, download and save locally
-      console.log('Downloading from URL...');
+    // ────────────────────────────────────────────────────────────
+    // Determine data type & prepare buffer
+    // ────────────────────────────────────────────────────────────
+    if (
+      newImageData.startsWith('http://') ||
+      newImageData.startsWith('https://')
+    ) {
+      // It's a URL
       try {
-        const response = await axios.get(newImageData, { responseType: 'arraybuffer' });
+        const response = await axios.get(newImageData, {
+          responseType: 'arraybuffer',
+        });
         const buffer = Buffer.from(response.data, 'binary');
 
-        // Generate unique filename
-        const hash = crypto.createHash('md5').update(newImageData).digest('hex');
+        const hash = crypto
+          .createHash('md5')
+          .update(newImageData)
+          .digest('hex');
         const fileName = `${hash}.jpg`;
 
         uploadResult = await uploadCustomImage(buffer, fileName, req);
-        console.log('Download and save successful');
-      } catch (uploadError) {
-        console.error('Download from URL failed:', uploadError);
-        throw uploadError;
+      } catch (downloadError) {
+        throw downloadError;
       }
+
     } else if (newImageData.startsWith('data:image')) {
-      // It's base64 data
-      console.log('Processing base64 data...');
+      // It's base64
       try {
         const base64Data = newImageData.split(',')[1];
-        const buffer = Buffer.from(base64Data, 'base64');
+        if (!base64Data) {
+          throw new Error('Base64 payload is empty');
+        }
 
-        // Generate unique filename
-        const hash = crypto.createHash('md5').update(base64Data).digest('hex');
+        const buffer = Buffer.from(base64Data, 'base64');
+        const hash = crypto
+          .createHash('md5')
+          .update(base64Data)
+          .digest('hex');
         const fileName = `${hash}.jpg`;
 
         uploadResult = await uploadCustomImage(buffer, fileName, req);
-        console.log('Base64 save successful');
       } catch (uploadError) {
-        console.error('Base64 save failed:', uploadError);
         throw uploadError;
       }
+
     } else {
-      console.log('Invalid image data format');
-      return res.status(400).json({ error: 'Invalid image data format. Please provide a URL (http/https) or base64 data (data:image/...)' });
+      return res.status(400).json({
+        error:
+          'Invalid image data format. Please provide a URL (http/https) or base64 data (data:image/...)',
+      });
     }
 
-    console.log('Image replaced successfully locally');
-    console.log('New URL:', uploadResult.secure_url);
-    console.log('New public_id:', uploadResult.public_id);
-
-    // Determine the URL to store in Google Sheets
-    // uploadResult.secure_url is now the Dropbox direct link (or local fallback URL)
     const storedUrl = uploadResult.secure_url;
 
-    // Update Google Sheets if URL is provided
+    // ────────────────────────────────────────────────────────────
+    // Update Google Sheets
+    // ────────────────────────────────────────────────────────────
     if (url) {
       try {
         const sheets = await initGoogleSheets();
         const row = await findRowByUrl(sheets, url);
         if (row) {
-          console.log('Found row in Google Sheets:', row.index);
-          // Update the image URL in column D (index 3, 0-based) with Dropbox URL
           const rowData = row.data;
-          rowData[3] = storedUrl; // Store full Dropbox URL (not just filename)
-          const updateSuccess = await updateGoogleSheetRow(sheets, row.index, rowData);
-          if (updateSuccess) {
-            console.log('Google Sheets updated successfully with URL:', storedUrl);
-          } else {
-            console.log('Failed to update Google Sheets');
-          }
-        } else {
-          console.log('Row not found in Google Sheets for URL:', url);
+          rowData[3] = storedUrl;
+          await updateGoogleSheetRow(sheets, row.index, rowData);
         }
       } catch (sheetsError) {
-        console.error('Error updating Google Sheets:', sheetsError.message);
-        // Continue with response even if Google Sheets update fails
+        // Continue with response even if Sheets update fails
       }
     }
 
-    res.json({
+    // ────────────────────────────────────────────────────────────
+    // ✅ Final success log
+    // ────────────────────────────────────────────────────────────
+    const duration = Date.now() - startTime;
+    const isLocal =
+      storedUrl.includes('192.168.') || storedUrl.includes('localhost');
+    console.log(`   ├─ new image : ${storedUrl.substring(0, 80)}${storedUrl.length > 80 ? '...' : ''}`);
+
+    return res.json({
       success: true,
       message: 'Image replaced successfully',
-      newImageUrl: storedUrl,          // Full URL for immediate display
-      filename: uploadResult.public_id, // Filename / public_id for reference
-      publicId: uploadResult.public_id
+      newImageUrl: storedUrl,
+      filename: uploadResult.public_id,
+      publicId: uploadResult.public_id,
     });
 
   } catch (error) {
-    console.error('=== Error replacing image ===');
-    console.error('Error message:', error.message);
-    console.error('Full error:', error);
-    res.status(500).json({
+    // ────────────────────────────────────────────────────────────
+    // ✅ Final failure log
+    // ────────────────────────────────────────────────────────────
+    const duration = Date.now() - startTime;
+    console.log(`   ├─ Message  : ${error.message}`);
+
+
+    return res.status(500).json({
       error: 'Failed to replace image',
-      details: error.message
+      details: error.message,
     });
   }
 });
@@ -1182,6 +1244,209 @@ app.get('/image-url/:filename', (req, res) => {
   }
 });
 
+app.post('/delete-item', async (req, res) => {
+  const { id } = req.body;
+
+  if (!id || typeof id !== 'string' || id.trim() === '') {
+    return res.status(400).json({
+      success: false,
+      error: 'id is required and must be a non-empty string'
+    });
+  }
+
+  const errors = [];
+  let imagesDeleted = 0;
+  let imagesFailed = 0;
+  let rowIndex = -1;
+  let imageUrls = [];
+
+  try {
+    // [1] Initialize Google Sheets
+    const sheets = await initGoogleSheets();
+
+    // [2] Read all rows from the "keep" sheet
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A:G`,
+    });
+
+    const rows = response.data.values;
+    if (!rows || rows.length <= 1) {
+      return res.status(404).json({
+        success: false,
+        error: 'Sheet is empty or contains only the header'
+      });
+    }
+
+    // [3] Find the row where column G (index 6) matches the group
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      const rowGroup = row[6]?.toString().trim();
+
+      if (row.length >= 7 && rowGroup === id.trim()) {
+        rowIndex = i + 1;
+
+        if (row.length > 3 && row[3]) {
+          imageUrls = row[3]
+            .toString()
+            .split(',')
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0);
+        }
+        break;
+      }
+    }
+
+    if (rowIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        error: `No row found with id: ${id}`
+      });
+    }
+
+    // [4] Delete each image from Dropbox (fallback: local storage)
+    for (const imageUrl of imageUrls) {
+      if (!imageUrl) continue;
+
+      try {
+        const fileId = extractFileIdFromUrl(imageUrl);
+        if (!fileId) {
+          errors.push(`Could not extract fileId from: ${imageUrl}`);
+          imagesFailed++;
+          continue;
+        }
+
+        const deleted = await deleteFileById(fileId);
+        if (deleted) {
+          imagesDeleted++;
+        } else {
+          imagesFailed++;
+          errors.push(`Image not found: ${fileId}`);
+        }
+      } catch (imgErr) {
+        imagesFailed++;
+        errors.push(`Failed to delete image ${imageUrl}: ${imgErr.message}`);
+      }
+    }
+
+    // [5] Delete the row from Google Sheets
+    const batchUpdateRequest = {
+      requests: [
+        {
+          deleteDimension: {
+            range: {
+              sheetId: 0,
+              dimension: 'ROWS',
+              startIndex: rowIndex - 1,
+              endIndex: rowIndex,
+            },
+          },
+        },
+      ],
+    };
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: batchUpdateRequest,
+    });
+
+    // [6] Final success response
+    return res.json({
+      success: true,
+      message: 'Item deleted successfully',
+      deletedRow: {
+        id,
+        rowIndex,
+        imageUrls,
+      },
+      imagesDeleted,
+      imagesFailed,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+
+  } catch (error) {
+    // [7] Final failure response
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to delete item',
+      details: error.message,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  }
+});
+
+
+function extractFileIdFromUrl(url) {
+  if (!url) return null;
+
+  if (!url.startsWith('http')) {
+    return url.replace(/\.(p|jpg|jpeg|png|v|mp4)$/i, '');
+  }
+
+  try {
+    const parsed = new URL(url);
+    const fileName = parsed.pathname.split('/').filter(Boolean).pop();
+    if (!fileName) return null;
+    return fileName.replace(/\.(p|jpg|jpeg|png|v|mp4)$/i, '');
+  } catch {
+    return null;
+  }
+}
+
+
+async function deleteFileById(fileId) {
+  const extensions = ['.p', '.v', '.jpg', '.mp4', '.png', '.jpeg'];
+
+  // Try Dropbox deletion
+  try {
+    const dropboxClient = await getDropboxClient();
+    for (const ext of extensions) {
+      const dropboxPath = `/keep-images/${fileId}${ext}`;
+      try {
+        await dropboxClient.filesDeleteV2({ path: dropboxPath });
+        console.log(`✅ Deleted from Dropbox: ${dropboxPath}`);
+        return true;
+      } catch (err) {
+        // silent — try next extension
+      }
+    }
+  } catch (tokenError) {
+    console.warn('⚠️  Dropbox unavailable for deletion:', tokenError.message);
+  }
+
+  // Fallback: local storage
+  const localPath = path.join(__dirname, 'img', `${fileId}.p`);
+  if (fs.existsSync(localPath)) {
+    fs.unlinkSync(localPath);
+    console.log(`✅ Deleted from local storage: ${localPath}`);
+    return true;
+  }
+
+  console.log(`❌ File not found in Dropbox nor local storage: ${fileId}`);
+  return false;
+}
+
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'Server is running',
+    endpoints: [
+      '/health',
+      '/extract-image',
+      '/save-to-sheets',
+      '/save-url-only',
+      '/process-missing-images',
+      '/process-data-to-json',
+      '/get-json-data',
+      '/replace-image',
+      '/image-url/:filename',
+      '/download-video',
+      '/take-screenshot',
+      '/delete-image',
+      '/delete-item',   // ← جديد
+    ]
+  });
+});
 // Route to download video from URL
 app.post('/download-video', async (req, res) => {
   try {
@@ -1281,7 +1546,8 @@ app.post('/download-video', async (req, res) => {
       const dropboxPath = `/keep-images/${fileName}`;
       console.log('Uploading to Dropbox:', dropboxPath);
 
-      await dropbox.filesUpload({
+      const dropboxClient = await getDropboxClient();
+await dropboxClient.filesUpload({
         path: dropboxPath,
         contents: videoBuffer,
         mode: 'overwrite',
@@ -1291,7 +1557,7 @@ app.post('/download-video', async (req, res) => {
       console.log('Successfully uploaded to Dropbox:', dropboxPath);
 
       // Create a shared link for the file
-      const sharedLinkResponse = await dropbox.sharingCreateSharedLink({
+      const sharedLinkResponse = await dropboxClient.sharingCreateSharedLink({
         path: dropboxPath,
         settings: {
           requested_visibility: 'public'
@@ -1587,7 +1853,8 @@ app.post('/delete-image', async (req, res) => {
     try {
       // Delete file from Dropbox
       console.log('Attempting to delete from Dropbox...');
-      await dropbox.filesDeleteV2({ path: dropboxPath });
+      const dropboxClient = await getDropboxClient();
+await dropboxClient.filesDeleteV2({ path: dropboxPath });
       console.log('Successfully deleted from Dropbox:', dropboxPath);
 
       res.json({
