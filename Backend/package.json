@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
-    "build": "npm install && npx puppeteer browsers install chrome",
+    "build": "rm -rf /opt/render/.cache/puppeteer && npm install && npx puppeteer browsers install chrome",
     "render-start": "node server.js"
   },
   "keywords": [],
