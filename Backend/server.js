@@ -638,7 +638,258 @@ await dropboxClient.filesUpload({
     }
   }
 }
+// ═══════════════════════════════════════════════════════════
+// Route to process missing images using SCREENSHOT
+// ═══════════════════════════════════════════════════════════
+app.post('/process-missing-images-screenshot', async (req, res) => {
+  const startTime = Date.now();
+  const results = {
+    processed: 0,
+    updated: 0,
+    failed: 0,
+    details: []
+  };
 
+  try {
+    // [1] Initialize Google Sheets
+    const sheets = await initGoogleSheets();
+
+    // [2] Read all data from Google Sheets
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A:Z`,
+    });
+
+    const rows = response.data.values;
+    if (!rows || rows.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No data found in the sheet',
+        ...results
+      });
+    }
+
+    console.log(`\n=== Processing ${rows.length - 1} rows for missing images (SCREENSHOT MODE) ===\n`);
+
+    // [3] Collect rows with empty img
+    const rowsToProcess = [];
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      const img = row[3];
+
+      // Check if img is missing or empty
+      if (!img || img.trim() === '') {
+        rowsToProcess.push({
+          rowIndex: i + 1,  // 1-based index in sheet
+          id: row[0],
+          name: row[1] || '',
+          sit: row[2],
+          datetime: row[4] || '',
+          info: row[5] || '',
+          group: row[6] || ''
+        });
+      }
+    }
+
+    if (rowsToProcess.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No rows with missing images found',
+        ...results
+      });
+    }
+
+    console.log(`Found ${rowsToProcess.length} rows with missing images\n`);
+
+    // [4] Process each row
+    for (const item of rowsToProcess) {
+      results.processed++;
+
+      if (!item.sit || item.sit.trim() === '') {
+        results.failed++;
+        results.details.push({
+          rowIndex: item.rowIndex,
+          id: item.id,
+          sit: item.sit,
+          status: 'failed',
+          error: 'Empty sit URL'
+        });
+        continue;
+      }
+
+      let browser = null;
+      try {
+        console.log(`\n[${results.processed}/${rowsToProcess.length}] Processing row ${item.rowIndex}: ${item.sit}`);
+
+        // ─────────────────────────────────────────────
+        // 4.1 Take Screenshot
+        // ─────────────────────────────────────────────
+        const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'];
+
+        let executablePath;
+        if (process.env.RENDER === 'true') {
+          const chromium = require('@sparticuz/chromium');
+          executablePath = await chromium.executablePath();
+          launchArgs.push(...chromium.args);
+        } else {
+          executablePath = undefined;
+        }
+
+        browser = await puppeteer.launch({
+          headless: 'new',
+          args: launchArgs,
+          executablePath: executablePath
+        });
+
+        const page = await browser.newPage();
+        await page.setViewport({ width: 1280, height: 720 });
+        await page.setUserAgent(
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        );
+
+        // Handle dialogs automatically
+        page.on('dialog', async (dialog) => {
+          try { await dialog.accept(); } catch (e) { /* ignore */ }
+        });
+
+        console.log(`   → Navigating to ${item.sit}...`);
+        await page.goto(item.sit, {
+          waitUntil: 'networkidle2',
+          timeout: 60000,
+          referer: 'https://www.google.com/'
+        });
+
+        // Brief wait for final rendering
+        await new Promise(r => setTimeout(r, 1500));
+
+        // Try to close common popups
+        try {
+          await page.evaluate(() => {
+            const selectors = [
+              '.cookie-banner', '.cookie-consent', '#cookie-banner',
+              '.modal-backdrop', '.modal-overlay', '.popup-overlay',
+              '[role="dialog"]', '[aria-modal="true"]'
+            ];
+            selectors.forEach(sel => {
+              document.querySelectorAll(sel).forEach(el => {
+                try { el.remove(); } catch (e) { /* ignore */ }
+              });
+            });
+            window.scrollTo(0, 0);
+          });
+        } catch (e) { /* ignore popup errors */ }
+
+        console.log('   → Taking screenshot...');
+        const screenshotBuffer = await page.screenshot({
+          type: 'jpeg',
+          quality: 80,
+          fullPage: false
+        });
+
+        await browser.close();
+        browser = null;
+
+        console.log(`   ✓ Screenshot taken: ${screenshotBuffer.length} bytes`);
+
+        // ─────────────────────────────────────────────
+        // 4.2 Upload Screenshot to Dropbox
+        // ─────────────────────────────────────────────
+        // Generate a stable filename based on sit URL
+        const hash = crypto.createHash('md5').update(item.sit).digest('hex');
+        const fileName = `screenshot_${hash}.jpg`;
+
+        // Use uploadCustomImage (it already handles Dropbox + fallback to local)
+        // We need to simulate req-like usage — uploadCustomImage accepts (buffer, fileName, req)
+        const uploadResult = await uploadCustomImage(screenshotBuffer, fileName, req);
+        const storedUrl = uploadResult.secure_url;
+
+        console.log(`   ✓ Uploaded: ${storedUrl.substring(0, 80)}...`);
+
+        // ─────────────────────────────────────────────
+        // 4.3 Update Google Sheets row
+        // ─────────────────────────────────────────────
+        // Preserve all original columns, only replace column D (img, index 3)
+        const updatedRowData = [
+          item.id,        // A - id
+          item.name,      // B - name
+          item.sit,       // C - sit
+          storedUrl,      // D - img  ← updated
+          item.datetime,  // E - datetime
+          item.info,      // F - info
+          item.group      // G - group
+        ];
+
+        const updateSuccess = await updateGoogleSheetRow(
+          sheets,
+          item.rowIndex,
+          updatedRowData
+        );
+
+        if (updateSuccess) {
+          results.updated++;
+          results.details.push({
+            rowIndex: item.rowIndex,
+            id: item.id,
+            sit: item.sit,
+            status: 'updated',
+            imageUrl: storedUrl
+          });
+          console.log(`   ✓ Row ${item.rowIndex} updated successfully`);
+        } else {
+          results.failed++;
+          results.details.push({
+            rowIndex: item.rowIndex,
+            id: item.id,
+            sit: item.sit,
+            status: 'failed',
+            error: 'Failed to update Google Sheets row'
+          });
+          console.log(`   ✗ Row ${item.rowIndex} update failed`);
+        }
+
+      } catch (rowError) {
+        // Close browser if still open
+        if (browser) {
+          try { await browser.close(); } catch (e) { /* ignore */ }
+        }
+
+        results.failed++;
+        results.details.push({
+          rowIndex: item.rowIndex,
+          id: item.id,
+          sit: item.sit,
+          status: 'failed',
+          error: rowError.message
+        });
+
+        console.error(`   ✗ Error processing row ${item.rowIndex}:`, rowError.message);
+      }
+    }
+
+    // [5] Final response
+    const duration = Date.now() - startTime;
+    console.log(`\n=== Screenshot Processing Complete ===`);
+    console.log(`   Processed: ${results.processed}`);
+    console.log(`   Updated:   ${results.updated}`);
+    console.log(`   Failed:    ${results.failed}`);
+    console.log(`   Duration:  ${(duration / 1000).toFixed(2)}s\n`);
+
+    res.json({
+      success: true,
+      message: `Processed ${results.processed} rows, updated ${results.updated}, failed ${results.failed}`,
+      duration: `${(duration / 1000).toFixed(2)}s`,
+      ...results
+    });
+
+  } catch (error) {
+    console.error('Error processing missing images via screenshot:', error.message);
+    res.status(500).json({
+      error: 'Failed to process missing images via screenshot',
+      details: error.message,
+      ...results
+    });
+  }
+});
 // Route to extract and upload image from a URL
 app.post('/extract-image', async (req, res) => {
   try {
@@ -1071,7 +1322,28 @@ app.post('/process-data-to-json', async (req, res) => {
     });
   }
 });
-
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    message: 'Server is running',
+    endpoints: [
+      '/health',
+      '/extract-image',
+      '/save-to-sheets',
+      '/save-url-only',
+      '/process-missing-images',
+      '/process-missing-images-screenshot',  // ← جديد
+      '/process-data-to-json',
+      '/get-json-data',
+      '/replace-image',
+      '/image-url/:filename',
+      '/download-video',
+      '/take-screenshot',
+      '/delete-image',
+      '/delete-item',
+    ]
+  });
+});
 // Route to get JSON data from Google Sheets (for client-side caching)
 app.get('/get-json-data', async (req, res) => {
   try {
@@ -1894,7 +2166,64 @@ await dropboxClient.filesDeleteV2({ path: dropboxPath });
     });
   }
 });
+// ═══════════════════════════════════════════════════════════
+// Proxy images with proper headers (لحل مشكلة xhpingcdn)
+// ═══════════════════════════════════════════════════════════
+app.get('/proxy-image', async (req, res) => {
+  const imageUrl = req.query.url;
+  
+  if (!imageUrl) {
+    return res.status(400).send('url query parameter is required');
+  }
 
+  try {
+    console.log('🖼️ Proxying:', imageUrl);
+
+    // استخرج النطاق لاستخدامه كـ Referer
+    let referer = 'https://www.google.com/';
+    try {
+      const parsed = new URL(imageUrl);
+      referer = `${parsed.protocol}//${parsed.host}/`;
+    } catch (e) {
+      console.warn('Could not parse URL for referer');
+    }
+
+    const response = await axios.get(imageUrl, {
+      responseType: 'arraybuffer',
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': referer,
+        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      timeout: 20000,
+      // ✅ مهم: لا تتحقق من صحة الرموز
+      validateStatus: (status) => status >= 200 && status < 400,
+    });
+
+    const contentType = response.headers['content-type'] || 'image/jpeg';
+    
+    // تحقق أن الاستجابة صورة وليست HTML
+    if (contentType.includes('text/html')) {
+      console.error('❌ Server returned HTML instead of image');
+      return res.status(502).send('Upstream returned HTML');
+    }
+
+    console.log(`✅ Proxied successfully: ${contentType}, ${response.data.length} bytes`);
+
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', 'public, max-age=86400'); // كاش يوم واحد
+    res.set('Access-Control-Allow-Origin', '*');
+    res.send(Buffer.from(response.data));
+
+  } catch (error) {
+    console.error('❌ Proxy error:', error.message);
+    console.error('   URL:', imageUrl);
+    
+    // fallback: صورة رمادية
+    res.status(502).send('Failed to fetch image');
+  }
+});
 // Health check route
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', message: 'Server is running' });
