@@ -1241,7 +1241,9 @@ app.post('/process-data-to-json', async (req, res) => {
 
     // Calculate actual number of batches needed based on total rows
     const actualMaxRows = Math.min(totalRows, 600); // Cap at 600 rows max
+    const totalBatches = Math.ceil(actualMaxRows / batchSize);
 
+    // عكس ترتيب الخانات: آخر batch → العمود A، أول batch → العمود الأخير
     for (let startRow = 0; startRow < actualMaxRows; startRow += batchSize) {
       const endRow = Math.min(startRow + batchSize, totalRows);
       const range = `${sourceSheetName}!A${startRow + 1}:G${endRow}`;
@@ -1260,18 +1262,25 @@ app.post('/process-data-to-json', async (req, res) => {
         break; // Stop processing if no data found
       }
 
+      // عكس قائمة البيانات داخل الـ batch
+      const reversedRows = [...rows].reverse();
+      console.log(`Reversed ${reversedRows.length} rows`);
+
       // Convert to JSON
-      const jsonData = JSON.stringify(rows);
-      console.log(`Converted ${rows.length} rows to JSON (${jsonData.length} characters)`);
+      const jsonData = JSON.stringify(reversedRows);
+      console.log(`Converted ${reversedRows.length} rows to JSON (${jsonData.length} characters)`);
       
       // Print first element for debugging
-      if (rows.length > 0) {
-        console.log('First row from source:', JSON.stringify(rows[0]));
+      if (reversedRows.length > 0) {
+        console.log('First row from source (after reverse):', JSON.stringify(reversedRows[0]));
       }
 
-      // Calculate which column to update (0-99 -> column A, 100-199 -> column B, etc.)
-      const columnIndex = Math.floor(startRow / batchSize);
-      const columnLetter = String.fromCharCode(65 + columnIndex); // A=0, B=1, C=2, etc.
+      // عكس ترتيب الخانات: آخر batch → العمود A، أول batch → العمود الأخير
+      const batchIndex = Math.floor(startRow / batchSize);
+      const reversedColumnIndex = totalBatches - 1 - batchIndex;
+      const columnLetter = String.fromCharCode(65 + reversedColumnIndex); // A=0, B=1, C=2, etc.
+
+      console.log(`Batch ${batchIndex} → Column ${columnLetter} (reversed index: ${reversedColumnIndex}, total batches: ${totalBatches})`);
 
       // Update target sheet (read) in the first row
       const updateRange = `${targetSheetName}!${columnLetter}1`;
@@ -1353,9 +1362,9 @@ app.get('/get-json-data', async (req, res) => {
 
     const jsonData = {};
 
-    // Read all columns A-J
-    for (let i = 0; i < 10; i++) {
-      const columnLetter = String.fromCharCode(65 + i);
+    // Read all columns F-A (reversed order to match server logic)
+    const columnLetters = ['F', 'E', 'D', 'C', 'B', 'A'];
+    for (const columnLetter of columnLetters) {
       const range = `${targetSheetName}!${columnLetter}1:${columnLetter}1`;
 
       try {
