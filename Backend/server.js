@@ -1656,6 +1656,45 @@ app.post('/delete-item', async (req, res) => {
   }
 });
 
+// Route to update cell A2 in the 'read' sheet
+app.post('/update-read-a2', async (req, res) => {
+  try {
+    const { value } = req.body;
+
+    if (!value || typeof value !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'value is required and must be a string'
+      });
+    }
+
+    const sheets = await initGoogleSheets();
+    const spreadsheetId = SPREADSHEET_ID;
+    const sheetName = 'read';
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${sheetName}!A2`,
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [[value]]
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'Updated cell A2 successfully'
+    });
+  } catch (error) {
+    console.error('Error updating A2:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update A2',
+      details: error.message
+    });
+  }
+});
+
 
 function extractFileIdFromUrl(url) {
   if (!url) return null;
