@@ -1350,6 +1350,7 @@ app.get('/', (req, res) => {
       '/take-screenshot',
       '/delete-image',
       '/delete-item',
+      '/proxy-image',  // ← جديد لحل مشكلة الصور
     ]
   });
 });
@@ -1652,6 +1653,88 @@ app.post('/delete-item', async (req, res) => {
       error: 'Failed to delete item',
       details: error.message,
       errors: errors.length > 0 ? errors : undefined,
+    });
+  }
+});
+
+// Route to update name in Google Sheets
+app.post('/update-name', async (req, res) => {
+  try {
+    const { group, newTitle } = req.body;
+
+    if (!group || typeof group !== 'string' || group.trim() === '') {
+      return res.status(400).json({
+        success: false,
+        error: 'group is required and must be a non-empty string'
+      });
+    }
+
+    if (!newTitle || typeof newTitle !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'newTitle is required and must be a string'
+      });
+    }
+
+    const sheets = await initGoogleSheets();
+    const spreadsheetId = SPREADSHEET_ID;
+    const sheetName = 'keep';
+
+    // Read all rows to find the matching group
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${sheetName}!A:G`,
+    });
+
+    const rows = response.data.values;
+    if (!rows || rows.length <= 1) {
+      return res.status(404).json({
+        success: false,
+        error: 'Sheet is empty or contains only the header'
+      });
+    }
+
+    // Find the row where column G (index 6) matches the group
+    let rowIndex = -1;
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      const rowGroup = row[6]?.toString().trim();
+
+      if (row.length >= 7 && rowGroup === group.trim()) {
+        rowIndex = i + 1; // Convert to 1-based index
+        break;
+      }
+    }
+
+    if (rowIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        error: 'Item with the specified group not found'
+      });
+    }
+
+    // Update column B (name) at the found row
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${sheetName}!B${rowIndex}`,
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [[newTitle]]
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'Name updated successfully',
+      rowIndex: rowIndex
+    });
+
+  } catch (error) {
+    console.error('Error updating name:', error.message);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to update name',
+      details: error.message
     });
   }
 });
@@ -2279,7 +2362,7 @@ app.get('/health', (req, res) => {
 
 // Root route
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'Server is running', endpoints: ['/health', '/extract-image', '/save-to-sheets', '/save-url-only', '/process-missing-images', '/process-data-to-json', '/get-json-data', '/replace-image', '/image-url/:filename', '/download-video', '/take-screenshot', '/delete-image'] });
+  res.json({ status: 'ok', message: 'Server is running', endpoints: ['/health', '/extract-image', '/save-to-sheets', '/save-url-only', '/process-missing-images', '/process-data-to-json', '/get-json-data', '/replace-image', '/image-url/:filename', '/download-video', '/take-screenshot', '/delete-image', '/update-name'] });
 });
 
 // Start server
