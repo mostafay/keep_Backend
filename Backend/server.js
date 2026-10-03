@@ -234,7 +234,7 @@ async function readGoogleSheets(sheets) {
   try {
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!A:Z`, // Read all columns
+      range: `${SHEET_NAME}!A:O`, // Read all columns
     });
 
     const rows = response.data.values;
@@ -291,7 +291,7 @@ async function updateGoogleSheetRow(sheets, rowIndex, rowData) {
   try {
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!A${rowIndex}:Z${rowIndex}`,
+      range: `${SHEET_NAME}!A${rowIndex}:O${rowIndex}`,
       valueInputOption: 'USER_ENTERED',
       resource: { values: [rowData] },
     });
@@ -1228,7 +1228,7 @@ app.post('/process-data-to-json', async (req, res) => {
     // Read all data from source sheet to get total rows
     const totalResponse = await sheets.spreadsheets.values.get({
       spreadsheetId: spreadsheetId,
-      range: `${sourceSheetName}!A:G`,
+      range: `${sourceSheetName}!A:O`,
     });
 
     const totalRows = totalResponse.data.values ? totalResponse.data.values.length : 0;
@@ -1246,7 +1246,7 @@ app.post('/process-data-to-json', async (req, res) => {
     // عكس ترتيب الخانات: آخر batch → العمود A، أول batch → العمود الأخير
     for (let startRow = 0; startRow < actualMaxRows; startRow += batchSize) {
       const endRow = Math.min(startRow + batchSize, totalRows);
-      const range = `${sourceSheetName}!A${startRow + 1}:G${endRow}`;
+      const range = `${sourceSheetName}!A${startRow + 1}:O${endRow}`;
 
       console.log(`Processing range: ${range} (rows ${startRow + 1}-${endRow})`);
 
@@ -1549,7 +1549,7 @@ app.post('/delete-item', async (req, res) => {
     // [2] Read all rows from the "keep" sheet
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!A:G`,
+      range: `${SHEET_NAME}!A:O`,
     });
 
     const rows = response.data.values;
@@ -1683,7 +1683,7 @@ app.post('/update-name', async (req, res) => {
     // Read all rows to find the matching group
     const response = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${sheetName}!A:G`,
+      range: `${sheetName}!A:O`,
     });
 
     const rows = response.data.values;
@@ -2020,7 +2020,7 @@ await dropboxClient.filesUpload({
 
       await sheets.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
-        range: `${SHEET_NAME}!A:G`,
+        range: `${SHEET_NAME}!A:O`,
         valueInputOption: 'USER_ENTERED',
         insertDataOption: 'INSERT_ROWS',
         resource: valueRange
