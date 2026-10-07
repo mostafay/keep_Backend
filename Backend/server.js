@@ -2047,6 +2047,262 @@ await dropboxClient.filesUpload({
   }
 });
 
+// Route to upload video to Dropbox from client
+app.post('/upload-video-to-dropbox', async (req, res) => {
+  try {
+    const { videoData, fileName, group } = req.body;
+
+    if (!videoData || !fileName) {
+      return res.status(400).json({ error: 'videoData and fileName are required' });
+    }
+
+    // Decode base64 video data
+    const base64Data = videoData.replace(/^data:video\/\w+;base64,/, '');
+    const videoBuffer = Buffer.from(base64Data, 'base64');
+
+    // Upload to Dropbox
+    let dropboxUrl;
+    let useLocalFallback = false;
+
+    try {
+      // Upload with .v extension to Dropbox
+      const dropboxPath = `/keep-images/${fileName}`;
+
+      const dropboxClient = await getDropboxClient();
+      await dropboxClient.filesUpload({
+        path: dropboxPath,
+        contents: videoBuffer,
+        mode: 'overwrite',
+        autorename: false,
+        content_type: 'video/mp4'
+      });
+
+      // Create a shared link for the file
+      const sharedLinkResponse = await dropboxClient.sharingCreateSharedLink({
+        path: dropboxPath,
+        settings: {
+          requested_visibility: 'public'
+        }
+      });
+
+      const sharedLink = sharedLinkResponse.result.url;
+
+      // Convert shared link to direct download link
+      dropboxUrl = sharedLink.replace('www.dropbox.com', 'dl.dropboxusercontent.com').replace('?dl=0', '');
+    } catch (dropboxError) {
+      console.error('Error uploading to Dropbox:', dropboxError.message);
+      useLocalFallback = true;
+
+      // Fallback to local storage if Dropbox fails
+      const imgDir = path.join(__dirname, 'img');
+
+      if (!fs.existsSync(imgDir)) {
+        fs.mkdirSync(imgDir, { recursive: true });
+      }
+
+      const filePath = path.join(imgDir, fileName);
+      fs.writeFileSync(filePath, videoBuffer);
+
+      // Use local server URL
+      const serverUrl = `${req.protocol}://${req.get('host')}`;
+      dropboxUrl = `${serverUrl}/img/${fileName}`;
+    }
+
+    // Add to Google Sheets
+    try {
+      const sheets = await initGoogleSheets();
+      const id = crypto.randomBytes(8).toString('hex');
+      const videoGroup = group || crypto.randomBytes(8).toString('hex');
+
+      const valueRange = {
+        values: [
+          [
+            id,
+            fileName, // Use filename as title
+            '', // Empty sit column
+            dropboxUrl, // Dropbox URL in img column
+            new Date().toISOString(),
+            '', // Empty column
+            videoGroup
+          ],
+        ],
+      };
+
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME}!A:Z`,
+        valueInputOption: 'USER_ENTERED',
+        insertDataOption: 'INSERT_ROWS',
+        resource: valueRange
+      });
+
+      console.log('Video added to Google Sheets successfully');
+    } catch (sheetsError) {
+      console.error('Error adding to Google Sheets:', sheetsError.message);
+      console.error('Full error:', sheetsError);
+      return res.status(500).json({
+        success: false,
+        error: 'Video uploaded to Dropbox but failed to add to Google Sheets',
+        details: sheetsError.message
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Video uploaded successfully',
+      filename: fileName,
+      dropboxUrl: dropboxUrl
+    });
+  } catch (error) {
+    console.error('Error in upload-video-to-dropbox:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// Route to reupload video from URL to Dropbox
+app.post('/reupload-video', async (req, res) => {
+  try {
+    const { url } = req.body;
+
+    if (!url) {
+      return res.status(400).json({ error: 'URL is required' });
+    }
+
+    let videoBuffer;
+    let fileName;
+
+    // Download video from URL
+    try {
+      const axiosConfig = {
+        method: 'GET',
+        url: url,
+        responseType: 'arraybuffer',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': '*/*',
+        },
+        timeout: 300000,
+        family: 4,
+      };
+
+      const response = await axios(axiosConfig);
+
+      const contentType = response.headers['content-type'];
+      if (!contentType || !contentType.startsWith('video/')) {
+        return res.status(400).json({
+          error: 'URL does not point to a video file',
+          contentType: contentType || 'unknown'
+        });
+      }
+
+      fileName = `vi_${Date.now()}.v`;
+      videoBuffer = Buffer.from(response.data);
+      console.log('Video downloaded successfully, size:', videoBuffer.length);
+    } catch (downloadError) {
+      console.error('Error downloading video:', downloadError.message);
+      console.error('Full error:', downloadError);
+      return res.status(400).json({
+        error: 'Failed to download video from URL',
+        details: downloadError.message
+      });
+    }
+
+    // Upload to Dropbox
+    let dropboxUrl;
+
+    try {
+      const dropboxPath = `/keep-images/${fileName}`;
+
+      const dropboxClient = await getDropboxClient();
+      await dropboxClient.filesUpload({
+        path: dropboxPath,
+        contents: videoBuffer,
+        mode: 'overwrite',
+        autorename: false,
+        content_type: 'video/mp4'
+      });
+
+      const sharedLinkResponse = await dropboxClient.sharingCreateSharedLink({
+        path: dropboxPath,
+        settings: {
+          requested_visibility: 'public'
+        }
+      });
+
+      const sharedLink = sharedLinkResponse.result.url;
+      dropboxUrl = sharedLink.replace('www.dropbox.com', 'dl.dropboxusercontent.com').replace('?dl=0', '');
+    } catch (dropboxError) {
+      console.error('Error uploading to Dropbox:', dropboxError.message);
+      const imgDir = path.join(__dirname, 'img');
+
+      if (!fs.existsSync(imgDir)) {
+        fs.mkdirSync(imgDir, { recursive: true });
+      }
+
+      const filePath = path.join(imgDir, fileName);
+      fs.writeFileSync(filePath, videoBuffer);
+
+      const serverUrl = `${req.protocol}://${req.get('host')}`;
+      dropboxUrl = `${serverUrl}/img/${fileName}`;
+    }
+
+    // Add to Google Sheets
+    try {
+      const sheets = await initGoogleSheets();
+      const id = crypto.randomBytes(8).toString('hex');
+      const videoGroup = crypto.randomBytes(8).toString('hex');
+
+      const valueRange = {
+        values: [
+          [
+            id,
+            fileName,
+            url,
+            dropboxUrl,
+            new Date().toISOString(),
+            '',
+            videoGroup
+          ],
+        ],
+      };
+
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `${SHEET_NAME}!A:Z`,
+        valueInputOption: 'USER_ENTERED',
+        insertDataOption: 'INSERT_ROWS',
+        resource: valueRange
+      });
+
+      console.log('Video added to Google Sheets successfully');
+    } catch (sheetsError) {
+      console.error('Error adding to Google Sheets:', sheetsError.message);
+      console.error('Full error:', sheetsError);
+      return res.status(500).json({
+        success: false,
+        error: 'Video uploaded to Dropbox but failed to add to Google Sheets',
+        details: sheetsError.message
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Video reuploaded successfully',
+      filename: fileName,
+      dropboxUrl: dropboxUrl
+    });
+  } catch (error) {
+    console.error('Error in reupload-video:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
 // Route to take screenshot of a website
 app.post('/take-screenshot', async (req, res) => {
   try {
